@@ -1,0 +1,5 @@
+{
+  "name": "Splinter",
+  "description": "A minimal, dark-themed video editor for trimming, cropping, and auto-detecting letterboxes.",
+  "requestFramePermissions": []
+}

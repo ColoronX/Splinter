@@ -6,24 +6,21 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { 
   Upload, 
-  Scissors, 
   Crop, 
   Download, 
   Trash2, 
   Play, 
   Pause, 
   Maximize, 
-  Minimize,
   Scan,
   Clipboard,
   FileVideo,
   Eye,
   EyeOff,
-  RefreshCcw,
   Undo2,
   Redo2,
   Repeat,
-  Copy
+  Keyboard
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { FFmpeg } from '@ffmpeg/ffmpeg';
@@ -59,10 +56,10 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [progress, setProgress] = useState(0);
   const [videoMetadata, setVideoMetadata] = useState({ width: 0, height: 0 });
-  const [isDraggingStart, setIsDraggingStart] = useState(false);
-  const [isDraggingEnd, setIsDraggingEnd] = useState(false);
-  const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
-  const [isRightClickDragging, setIsRightClickDragging] = useState(false);
+  
+  // High-performance timeline drag state
+  const [timelineDragState, setTimelineDragState] = useState<'start' | 'end' | 'playhead' | null>(null);
+  
   const [isLooping, setIsLooping] = useState(false);
   const [outputScale, setOutputScale] = useState(100);
   
@@ -74,7 +71,7 @@ export default function App() {
   const [resizeHandle, setResizeHandle] = useState<string | null>(null);
 
   const videoRef = useRef<HTMLVideoElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const videoWrapperRef = useRef<HTMLDivElement>(null);
   const timelineRef = useRef<HTMLDivElement>(null);
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const dragStartPos = useRef<{ x: number; y: number } | null>(null);
@@ -156,255 +153,6 @@ export default function App() {
     }
   }, []);
 
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-
-      if (e.code === 'Space') {
-        e.preventDefault();
-        togglePlay();
-      } else if (e.key.toLowerCase() === 'b') {
-        setTrimRange(prev => ({ ...prev, start: currentTime }));
-        addToHistory({ ...trimRange, start: currentTime }, cropArea);
-      } else if (e.key.toLowerCase() === 'n') {
-        setTrimRange(prev => ({ ...prev, end: currentTime }));
-        addToHistory({ ...trimRange, end: currentTime }, cropArea);
-      } else if (e.ctrlKey && e.key === 'z') {
-        e.preventDefault();
-        undo();
-      } else if (e.ctrlKey && (e.key === 'y' || (e.shiftKey && e.key === 'Z'))) {
-        e.preventDefault();
-        redo();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown, true);
-    return () => window.removeEventListener('keydown', handleKeyDown, true);
-  }, [isPlaying, currentTime, undo, redo, trimRange, cropArea, addToHistory, togglePlay]);
-
-  const loadFFmpeg = async () => {
-    if (ffmpegRef.current) return ffmpegRef.current;
-    
-    const ffmpeg = new FFmpeg();
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
-    await ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-    });
-    
-    ffmpegRef.current = ffmpeg;
-    return ffmpeg;
-  };
-
-  // --- Handlers ---
-
-  const handleFile = (file: File) => {
-    if (file.type.startsWith('video/')) {
-      setVideoFile(file);
-      const url = URL.createObjectURL(file);
-      setVideoUrl(url);
-      setIsPlaying(false);
-      setCurrentTime(0);
-      const initialCrop = { x: 0, y: 0, width: 100, height: 100 };
-      setCropArea(initialCrop);
-      setIsPreviewMode(false);
-      setHistory([{ trim: { start: 0, end: 0 }, crop: initialCrop }]);
-      setRedoStack([]);
-      
-      // Focus the video element to ensure spacebar works immediately
-      setTimeout(() => {
-        videoRef.current?.focus();
-      }, 100);
-    }
-  };
-
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    const file = e.dataTransfer.files[0];
-    if (file) handleFile(file);
-  };
-
-  const handleMetadataLoaded = () => {
-    if (videoRef.current) {
-      const d = videoRef.current.duration;
-      setDuration(d);
-      const initialTrim = { start: 0, end: d };
-      setTrimRange(initialTrim);
-      setVideoMetadata({
-        width: videoRef.current.videoWidth,
-        height: videoRef.current.videoHeight
-      });
-      setHistory([{ trim: initialTrim, crop: { x: 0, y: 0, width: 100, height: 100 } }]);
-    }
-  };
-
-  useEffect(() => {
-    if (isPlaying && videoRef.current) {
-      const start = Math.min(trimRange.start, trimRange.end);
-      const end = Math.max(trimRange.start, trimRange.end);
-      
-      if (currentTime >= end) {
-        if (isLooping) {
-          seekTo(start);
-        } else {
-          videoRef.current.pause();
-          setIsPlaying(false);
-        }
-      }
-    }
-  }, [currentTime, isPlaying, isLooping, trimRange, seekTo]);
-
-  const handleTimelineClick = (e: React.MouseEvent) => {
-    if (e.button !== 0) return; // Only left click for seeking
-    if (!timelineRef.current || duration === 0) return;
-    const rect = timelineRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const percentage = Math.max(0, Math.min(1, x / rect.width));
-    seekTo(percentage * duration);
-  };
-
-  const handleTimelineContextMenu = (e: React.MouseEvent) => {
-    e.preventDefault();
-    if (!timelineRef.current || duration === 0) return;
-    const rect = timelineRef.current.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const time = Math.max(0, Math.min(duration, (x / rect.width) * duration));
-    const newTrim = { start: time, end: time };
-    setTrimRange(newTrim);
-    setIsRightClickDragging(true);
-  };
-
-  useEffect(() => {
-    const handleGlobalMouseMove = (e: MouseEvent) => {
-      if (!timelineRef.current || duration === 0) return;
-      const rect = timelineRef.current.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const time = Math.max(0, Math.min(duration, (x / rect.width) * duration));
-
-      if (isRightClickDragging) {
-        setTrimRange(prev => ({ ...prev, end: time }));
-      } else if (isDraggingStart) {
-        setTrimRange(prev => ({ ...prev, start: Math.min(time, prev.end) }));
-      } else if (isDraggingEnd) {
-        setTrimRange(prev => ({ ...prev, end: Math.max(time, prev.start) }));
-      } else if (isDraggingPlayhead) {
-        seekTo(time);
-      }
-    };
-
-    const handleGlobalMouseUp = () => {
-      if (isRightClickDragging || isDraggingStart || isDraggingEnd) {
-        addToHistory(trimRange, cropArea);
-      }
-      setIsRightClickDragging(false);
-      setIsDraggingStart(false);
-      setIsDraggingEnd(false);
-      setIsDraggingPlayhead(false);
-    };
-
-    if (isRightClickDragging || isDraggingStart || isDraggingEnd || isDraggingPlayhead) {
-      window.addEventListener('mousemove', handleGlobalMouseMove);
-      window.addEventListener('mouseup', handleGlobalMouseUp);
-    }
-
-    return () => {
-      window.removeEventListener('mousemove', handleGlobalMouseMove);
-      window.removeEventListener('mouseup', handleGlobalMouseUp);
-    };
-  }, [isRightClickDragging, isDraggingStart, isDraggingEnd, isDraggingPlayhead, duration, trimRange, cropArea, addToHistory, seekTo]);
-
-  // --- Cropping Logic ---
-
-  const handleMouseDown = (e: React.MouseEvent) => {
-    if (!containerRef.current) return;
-    
-    // Check if clicking a handle
-    const target = e.target as HTMLElement;
-    const handle = target.getAttribute('data-handle');
-    if (handle) {
-      setResizeHandle(handle);
-      return;
-    }
-
-    if (!isCropping) return;
-    
-    const rect = containerRef.current.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * 100;
-    const y = ((e.clientY - rect.top) / rect.height) * 100;
-    dragStartPos.current = { x, y };
-    setCropArea({ x, y, width: 0, height: 0 });
-  };
-
-  const handleMouseMove = (e: React.MouseEvent) => {
-    if (!containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-
-    if (resizeHandle) {
-      const currentX = ((e.clientX - rect.left) / rect.width) * 100;
-      const currentY = ((e.clientY - rect.top) / rect.height) * 100;
-      
-      setCropArea(prev => {
-        let { x, y, width, height } = { ...prev };
-        const right = x + width;
-        const bottom = y + height;
-
-        if (resizeHandle.includes('e')) width = Math.max(1, currentX - x);
-        if (resizeHandle.includes('w')) {
-          const newX = Math.min(currentX, right - 1);
-          width = right - newX;
-          x = newX;
-        }
-        if (resizeHandle.includes('s')) height = Math.max(1, currentY - y);
-        if (resizeHandle.includes('n')) {
-          const newY = Math.min(currentY, bottom - 1);
-          height = bottom - newY;
-          y = newY;
-        }
-
-        return {
-          x: Math.max(0, x),
-          y: Math.max(0, y),
-          width: Math.min(100 - x, width),
-          height: Math.min(100 - y, height)
-        };
-      });
-      return;
-    }
-
-    if (!isCropping || !dragStartPos.current) return;
-    
-    const currentX = ((e.clientX - rect.left) / rect.width) * 100;
-    const currentY = ((e.clientY - rect.top) / rect.height) * 100;
-
-    const x = Math.min(dragStartPos.current.x, currentX);
-    const y = Math.min(dragStartPos.current.y, currentY);
-    const width = Math.abs(dragStartPos.current.x - currentX);
-    const height = Math.abs(dragStartPos.current.y - currentY);
-
-    setCropArea({
-      x: Math.max(0, x),
-      y: Math.max(0, y),
-      width: Math.min(100 - x, width),
-      height: Math.min(100 - y, height)
-    });
-  };
-
-  const handleMouseUp = () => {
-    if (dragStartPos.current || resizeHandle) {
-      addToHistory(trimRange, cropArea);
-    }
-    dragStartPos.current = null;
-    setResizeHandle(null);
-  };
-
-  const resetCrop = () => {
-    const newCrop = { x: 0, y: 0, width: 100, height: 100 };
-    setCropArea(newCrop);
-    addToHistory(trimRange, newCrop);
-  };
-
-  // --- Auto-detect Bars ---
-
   const detectBars = useCallback(() => {
     if (!videoRef.current) return;
     const video = videoRef.current;
@@ -434,7 +182,7 @@ export default function App() {
       let emptyCount = 0;
       const length = isRow ? canvas.width : canvas.height;
       
-      // Sample every pixel on the small canvas (it's only 320px, so it's fast)
+      // Sample every pixel on the small canvas
       for (let i = 0; i < length; i++) {
         const x = isRow ? i : lineIdx;
         const y = isRow ? lineIdx : i;
@@ -494,6 +242,287 @@ export default function App() {
     setCropArea(newCrop);
     addToHistory(trimRange, newCrop);
   }, [trimRange, addToHistory]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.key.toLowerCase() === 'b') {
+        setTrimRange(prev => {
+          const next = { ...prev, start: currentTime };
+          addToHistory(next, cropArea);
+          return next;
+        });
+      } else if (e.key.toLowerCase() === 'n') {
+        setTrimRange(prev => {
+          const next = { ...prev, end: currentTime };
+          addToHistory(next, cropArea);
+          return next;
+        });
+      } else if (e.key.toLowerCase() === 'c') {
+        setIsCropping(prev => !prev);
+      } else if (e.key.toLowerCase() === 'd') {
+        detectBars();
+      } else if (e.key.toLowerCase() === 'p') {
+        setIsPreviewMode(prev => !prev);
+      } else if (e.ctrlKey && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          redo();
+        } else {
+          undo();
+        }
+      } else if (e.ctrlKey && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        redo();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [isPlaying, currentTime, undo, redo, trimRange, cropArea, addToHistory, togglePlay, detectBars]);
+
+  const loadFFmpeg = async () => {
+    if (ffmpegRef.current) return ffmpegRef.current;
+    
+    const ffmpeg = new FFmpeg();
+    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm';
+    await ffmpeg.load({
+      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+    });
+    
+    ffmpegRef.current = ffmpeg;
+    return ffmpeg;
+  };
+
+  // --- Handlers ---
+
+  const handleFile = (file: File) => {
+    if (file.type.startsWith('video/')) {
+      setVideoFile(file);
+      const url = URL.createObjectURL(file);
+      setVideoUrl(url);
+      setIsPlaying(false);
+      setCurrentTime(0);
+      const initialCrop = { x: 0, y: 0, width: 100, height: 100 };
+      setCropArea(initialCrop);
+      setIsPreviewMode(false);
+      setHistory([{ trim: { start: 0, end: 0 }, crop: initialCrop }]);
+      setRedoStack([]);
+      
+      // Focus the video element to ensure spacebar works immediately
+      setTimeout(() => {
+        videoRef.current?.focus();
+      }, 100);
+    }
+  };
+
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (file) handleFile(file);
+  };
+
+  const handleMetadataLoaded = () => {
+    if (videoRef.current) {
+      const d = videoRef.current.duration;
+      setDuration(d);
+      const initialTrim = { start: 0, end: d };
+      setTrimRange(initialTrim);
+      setVideoMetadata({
+        width: videoRef.current.videoWidth,
+        height: videoRef.current.videoHeight
+      });
+      setHistory([{ trim: initialTrim, crop: { x: 0, y: 0, width: 100, height: 100 } }]);
+    }
+  };
+  
+  useEffect(() => {
+    let animationFrameId: number;
+    
+    const updatePlayhead = () => {
+      if (videoRef.current) {
+        setCurrentTime(videoRef.current.currentTime);
+      }
+      animationFrameId = requestAnimationFrame(updatePlayhead);
+    };
+
+    if (isPlaying) {
+      animationFrameId = requestAnimationFrame(updatePlayhead);
+    }
+
+    return () => cancelAnimationFrame(animationFrameId);
+  }, [isPlaying]);
+
+  useEffect(() => {
+    if (isPlaying && videoRef.current) {
+      const start = Math.min(trimRange.start, trimRange.end);
+      const end = Math.max(trimRange.start, trimRange.end);
+      
+      if (currentTime >= end) {
+        if (isLooping) {
+          seekTo(start);
+        } else {
+          videoRef.current.pause();
+          setIsPlaying(false);
+        }
+      }
+    }
+  }, [currentTime, isPlaying, isLooping, trimRange, seekTo]);
+
+  // --- High-Performance Timeline Pointer Handlers ---
+
+  const handleTimelinePointerDown = (e: React.PointerEvent, type: 'start' | 'end' | 'playhead') => {
+    e.preventDefault();
+    e.stopPropagation();
+    
+    if (!timelineRef.current || duration === 0) return;
+
+    let actualType = type;
+    const rect = timelineRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const time = Math.max(0, Math.min(duration, (x / rect.width) * duration));
+
+    // Support right click anywhere on track to fast-set 'end' point
+    if (type === 'playhead' && e.button === 2) {
+      actualType = 'end';
+      setTrimRange(prev => ({ ...prev, end: time }));
+    } else if (type === 'playhead' && e.button === 0) {
+      seekTo(time);
+    } else if (e.button !== 0) {
+      return;
+    }
+
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setTimelineDragState(actualType);
+  };
+
+  const handleTimelinePointerMove = (e: React.PointerEvent) => {
+    if (!timelineDragState || !timelineRef.current || duration === 0) return;
+    const rect = timelineRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const time = Math.max(0, Math.min(duration, (x / rect.width) * duration));
+
+    if (timelineDragState === 'playhead') {
+      seekTo(time);
+    } else if (timelineDragState === 'start') {
+      setTrimRange(prev => ({ ...prev, start: time }));
+    } else if (timelineDragState === 'end') {
+      setTrimRange(prev => ({ ...prev, end: time }));
+    }
+  };
+
+  const handleTimelinePointerUp = (e: React.PointerEvent) => {
+    if (!timelineDragState) return;
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    if (timelineDragState === 'start' || timelineDragState === 'end') {
+      addToHistory(trimRange, cropArea);
+    }
+    setTimelineDragState(null);
+  };
+
+  // --- Cropping Logic ---
+
+  const handlePointerDown = (e: React.PointerEvent) => {
+    if (!videoWrapperRef.current) return;
+    
+    // Check if clicking a handle
+    const target = e.target as HTMLElement;
+    const handle = target.getAttribute('data-handle') || target.parentElement?.getAttribute('data-handle');
+    
+    if (handle) {
+      e.currentTarget.setPointerCapture(e.pointerId);
+      setResizeHandle(handle);
+      return;
+    }
+
+    if (!isCropping) return;
+    
+    e.currentTarget.setPointerCapture(e.pointerId);
+    const rect = videoWrapperRef.current.getBoundingClientRect();
+    
+    // We calculate raw values which might be < 0 or > 100 if clicked outside the video but inside the padding
+    const rawX = ((e.clientX - rect.left) / rect.width) * 100;
+    const rawY = ((e.clientY - rect.top) / rect.height) * 100;
+    
+    // Clamp to start dragging smoothly exactly from the edge
+    const x = Math.max(0, Math.min(100, rawX));
+    const y = Math.max(0, Math.min(100, rawY));
+    
+    dragStartPos.current = { x, y };
+    setCropArea({ x, y, width: 0, height: 0 });
+  };
+
+  const handlePointerMove = (e: React.PointerEvent) => {
+    if (!videoWrapperRef.current) return;
+    const rect = videoWrapperRef.current.getBoundingClientRect();
+    
+    const rawX = ((e.clientX - rect.left) / rect.width) * 100;
+    const rawY = ((e.clientY - rect.top) / rect.height) * 100;
+    
+    const currentX = Math.max(0, Math.min(100, rawX));
+    const currentY = Math.max(0, Math.min(100, rawY));
+
+    if (resizeHandle) {
+      setCropArea(prev => {
+        let { x, y, width, height } = { ...prev };
+        const right = x + width;
+        const bottom = y + height;
+
+        if (resizeHandle.includes('e')) width = Math.max(1, currentX - x);
+        if (resizeHandle.includes('w')) {
+          const newX = Math.min(currentX, right - 1);
+          width = right - newX;
+          x = newX;
+        }
+        if (resizeHandle.includes('s')) height = Math.max(1, currentY - y);
+        if (resizeHandle.includes('n')) {
+          const newY = Math.min(currentY, bottom - 1);
+          height = bottom - newY;
+          y = newY;
+        }
+
+        return {
+          x: Math.max(0, x),
+          y: Math.max(0, y),
+          width: Math.min(100 - x, width),
+          height: Math.min(100 - y, height)
+        };
+      });
+      return;
+    }
+
+    if (!isCropping || !dragStartPos.current) return;
+    
+    const startX = dragStartPos.current.x;
+    const startY = dragStartPos.current.y;
+
+    const x = Math.min(startX, currentX);
+    const y = Math.min(startY, currentY);
+    const width = Math.abs(startX - currentX);
+    const height = Math.abs(startY - currentY);
+
+    setCropArea({ x, y, width, height });
+  };
+
+  const handlePointerUp = (e: React.PointerEvent) => {
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    if (dragStartPos.current || resizeHandle) {
+      addToHistory(trimRange, cropArea);
+    }
+    dragStartPos.current = null;
+    setResizeHandle(null);
+  };
+
+  const resetCrop = () => {
+    const newCrop = { x: 0, y: 0, width: 100, height: 100 };
+    setCropArea(newCrop);
+    addToHistory(trimRange, newCrop);
+  };
 
   // --- Export ---
 
@@ -581,8 +610,8 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-zinc-100 font-sans selection:bg-orange-500/30">
       <main className={cn(
-        "p-6 mx-auto transition-all duration-500",
-        videoUrl ? "max-w-[1600px] flex flex-col lg:flex-row gap-8 lg:items-stretch" : "max-w-6xl"
+        "p-4 md:p-6 mx-auto transition-all duration-500",
+        videoUrl ? "max-w-[1600px] flex flex-col lg:flex-row gap-6 md:gap-8 lg:items-stretch" : "max-w-6xl"
       )}>
         {!videoUrl ? (
           <motion.div 
@@ -613,188 +642,205 @@ export default function App() {
           <>
             {/* Left Column: Video & Timeline */}
             <div className="flex-1 flex flex-col gap-6 min-w-0">
-              {/* Viewport */}
+              {/* Viewport - Padded to allow external dragging */}
               <div 
-                ref={containerRef}
-                onMouseDown={handleMouseDown}
-                onMouseMove={handleMouseMove}
-                onMouseUp={handleMouseUp}
-                onDoubleClick={resetCrop}
                 className={cn(
-                  "relative bg-[#1a1a1a] rounded-2xl overflow-hidden border border-zinc-800 shadow-2xl group transition-all duration-300 mx-auto",
-                  isPreviewMode ? "w-full" : "w-fit max-w-full max-h-[70vh]"
+                  "relative flex items-center justify-center bg-[#1a1a1a] rounded-2xl overflow-hidden border border-zinc-800 shadow-2xl mx-auto touch-none select-none",
+                  "w-full", isPreviewMode ? "p-0 max-h-[70vh]" : "max-h-[70vh] p-4 sm:p-12"
                 )}
+				onPointerDown={isPreviewMode ? undefined : handlePointerDown}
+				onPointerMove={isPreviewMode ? undefined : handlePointerMove}
+				onPointerUp={isPreviewMode ? undefined : handlePointerUp}
+				onPointerCancel={isPreviewMode ? undefined : handlePointerUp}
+				onDoubleClick={isPreviewMode ? undefined : resetCrop}
                 style={{ 
-                  cursor: isCropping ? 'crosshair' : 'default',
                   backgroundImage: 'radial-gradient(#2a2a2a 1px, transparent 1px)',
                   backgroundSize: '20px 20px',
-                  aspectRatio: videoMetadata.width ? (
-                    isPreviewMode 
-                      ? `${cropArea.width * videoMetadata.width} / ${cropArea.height * videoMetadata.height}` 
-                      : `${videoMetadata.width} / ${videoMetadata.height}`
-                  ) : '16/9'
                 }}
               >
-                <video 
-                  ref={videoRef}
-                  src={videoUrl}
-                  className={cn(
-                    "w-full h-full transition-all duration-300 outline-none",
-                    isPreviewMode ? "object-fill" : "object-contain"
-                  )}
-                  style={isPreviewMode ? {
-                    width: `${(100 / cropArea.width) * 100}%`,
-                    height: `${(100 / cropArea.height) * 100}%`,
-                    maxWidth: 'none',
-                    position: 'absolute',
-                    left: `${-cropArea.x * (100 / cropArea.width)}%`,
-                    top: `${-cropArea.y * (100 / cropArea.height)}%`,
-                  } : {}}
-                  onLoadedMetadata={handleMetadataLoaded}
-                  onTimeUpdate={() => videoRef.current && setCurrentTime(videoRef.current.currentTime)}
-                  onPlay={() => setIsPlaying(true)}
-                  onPause={() => setIsPlaying(false)}
-                  onEnded={() => {
-                    if (isLooping) {
-                      const start = Math.min(trimRange.start, trimRange.end);
-                      seekTo(start);
-                      videoRef.current?.play();
-                    } else {
-                      setIsPlaying(false);
-                    }
-                  }}
-                  onClick={() => !isCropping && togglePlay()}
-                  tabIndex={0}
-                />
-
-                {/* Crop Overlay */}
-                <div 
-                  className={cn(
-                    "absolute border-2 border-orange-500 transition-opacity",
-                    (isCropping || dragStartPos.current || resizeHandle || cropArea.width < 100 || cropArea.height < 100) ? "opacity-100" : "opacity-0",
-                    isPreviewMode && "hidden"
-                  )}
-                  style={{
-                    left: `${cropArea.x}%`,
-                    top: `${cropArea.y}%`,
-                    width: `${cropArea.width}%`,
-                    height: `${cropArea.height}%`,
-                    boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.6)',
-                    pointerEvents: isCropping ? 'none' : 'auto'
-                  }}
+			  <div 
+				ref={videoWrapperRef}
+				className={cn("relative transition-all duration-300", isPreviewMode && "overflow-hidden")}
+				style={{
+				cursor: isCropping ? 'crosshair' : 'default',
+				aspectRatio: videoMetadata.width ? (
+					isPreviewMode 
+					? `${cropArea.width * videoMetadata.width} / ${cropArea.height * videoMetadata.height}` 
+					: `${videoMetadata.width} / ${videoMetadata.height}`
+				) : '16/9',
+				height: isPreviewMode ? 'fit-content' : '100%',
+				width: isPreviewMode ? 'fit-content' : 'auto',
+				maxHeight: '100%',
+				maxWidth: '100%'
+				}}
                 >
-                  <div className="absolute -top-6 left-0 bg-orange-500 text-black text-[10px] font-bold px-1.5 py-0.5 rounded uppercase tracking-wider">
-                    Crop Area
+				{isPreviewMode && (
+				  <svg 
+					viewBox={`0 0 ${Math.max(1, cropArea.width * videoMetadata.width)} ${Math.max(1, cropArea.height * videoMetadata.height)}`} 
+					className="block max-w-full max-h-[70vh] opacity-0 pointer-events-none" 
+					style={{ width: '100vw', height: 'auto' }}
+				  />
+				)}
+                  <video 
+                    ref={videoRef}
+                    src={videoUrl}
+                    className={cn(
+                      "w-full h-full transition-all duration-300 outline-none block",
+                      isPreviewMode ? "object-fill" : "object-contain"
+                    )}
+                    style={isPreviewMode ? {
+                      width: `${(100 / cropArea.width) * 100}%`,
+                      height: `${(100 / cropArea.height) * 100}%`,
+                      maxWidth: 'none',
+                      position: 'absolute',
+                      left: `${-cropArea.x * (100 / cropArea.width)}%`,
+                      top: `${-cropArea.y * (100 / cropArea.height)}%`,
+                    } : {}}
+                    onLoadedMetadata={handleMetadataLoaded}
+                    onPlay={() => setIsPlaying(true)}
+                    onPause={() => setIsPlaying(false)}
+                    onEnded={() => {
+                      if (isLooping) {
+                        const start = Math.min(trimRange.start, trimRange.end);
+                        seekTo(start);
+                        videoRef.current?.play();
+                      } else {
+                        setIsPlaying(false);
+                      }
+                    }}
+                    onClick={() => !isCropping && togglePlay()}
+                    tabIndex={0}
+                  />
+
+                  {/* Crop Overlay */}
+                  <div 
+                    className={cn(
+                      "absolute border-2 border-orange-500 transition-opacity",
+                      (isCropping || dragStartPos.current || resizeHandle || cropArea.width < 100 || cropArea.height < 100) ? "opacity-100" : "opacity-0",
+                      isPreviewMode && "hidden"
+                    )}
+                    style={{
+                      left: `${cropArea.x}%`,
+                      top: `${cropArea.y}%`,
+                      width: `${cropArea.width}%`,
+                      height: `${cropArea.height}%`,
+                      boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.6)',
+                      pointerEvents: isCropping ? 'none' : 'auto'
+                    }}
+                  >
+                    
+                    {/* Enlarged touch-friendly Resize Handles */}
+                    {!isCropping && (
+                      <>
+                        <div data-handle="nw" className="absolute -top-4 -left-4 w-8 h-8 flex items-center justify-center cursor-nw-resize z-50 pointer-events-auto touch-none">
+                          <div className="w-3 h-3 bg-white border border-orange-500 rounded-full pointer-events-none" />
+                        </div>
+                        <div data-handle="n" className="absolute -top-4 left-1/2 -translate-x-1/2 w-8 h-8 flex items-center justify-center cursor-n-resize z-50 pointer-events-auto touch-none">
+                          <div className="w-3 h-3 bg-white border border-orange-500 rounded-full pointer-events-none" />
+                        </div>
+                        <div data-handle="ne" className="absolute -top-4 -right-4 w-8 h-8 flex items-center justify-center cursor-ne-resize z-50 pointer-events-auto touch-none">
+                          <div className="w-3 h-3 bg-white border border-orange-500 rounded-full pointer-events-none" />
+                        </div>
+                        <div data-handle="e" className="absolute top-1/2 -translate-y-1/2 -right-4 w-8 h-8 flex items-center justify-center cursor-e-resize z-50 pointer-events-auto touch-none">
+                          <div className="w-3 h-3 bg-white border border-orange-500 rounded-full pointer-events-none" />
+                        </div>
+                        <div data-handle="se" className="absolute -bottom-4 -right-4 w-8 h-8 flex items-center justify-center cursor-se-resize z-50 pointer-events-auto touch-none">
+                          <div className="w-3 h-3 bg-white border border-orange-500 rounded-full pointer-events-none" />
+                        </div>
+                        <div data-handle="s" className="absolute -bottom-4 left-1/2 -translate-x-1/2 w-8 h-8 flex items-center justify-center cursor-s-resize z-50 pointer-events-auto touch-none">
+                          <div className="w-3 h-3 bg-white border border-orange-500 rounded-full pointer-events-none" />
+                        </div>
+                        <div data-handle="sw" className="absolute -bottom-4 -left-4 w-8 h-8 flex items-center justify-center cursor-sw-resize z-50 pointer-events-auto touch-none">
+                          <div className="w-3 h-3 bg-white border border-orange-500 rounded-full pointer-events-none" />
+                        </div>
+                        <div data-handle="w" className="absolute top-1/2 -translate-y-1/2 -left-4 w-8 h-8 flex items-center justify-center cursor-w-resize z-50 pointer-events-auto touch-none">
+                          <div className="w-3 h-3 bg-white border border-orange-500 rounded-full pointer-events-none" />
+                        </div>
+                      </>
+                    )}
                   </div>
-                  
-                  {/* Resize Handles */}
-                  {!isCropping && (
-                    <>
-                      <div data-handle="nw" className="absolute -top-1.5 -left-1.5 w-3 h-3 bg-white border border-orange-500 rounded-full cursor-nw-resize z-50 pointer-events-auto" />
-                      <div data-handle="n" className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border border-orange-500 rounded-full cursor-n-resize z-50 pointer-events-auto" />
-                      <div data-handle="ne" className="absolute -top-1.5 -right-1.5 w-3 h-3 bg-white border border-orange-500 rounded-full cursor-ne-resize z-50 pointer-events-auto" />
-                      <div data-handle="e" className="absolute top-1/2 -translate-y-1/2 -right-1.5 w-3 h-3 bg-white border border-orange-500 rounded-full cursor-e-resize z-50 pointer-events-auto" />
-                      <div data-handle="se" className="absolute -bottom-1.5 -right-1.5 w-3 h-3 bg-white border border-orange-500 rounded-full cursor-se-resize z-50 pointer-events-auto" />
-                      <div data-handle="s" className="absolute -bottom-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border border-orange-500 rounded-full cursor-s-resize z-50 pointer-events-auto" />
-                      <div data-handle="sw" className="absolute -bottom-1.5 -left-1.5 w-3 h-3 bg-white border border-orange-500 rounded-full cursor-sw-resize z-50 pointer-events-auto" />
-                      <div data-handle="w" className="absolute top-1/2 -translate-y-1/2 -left-1.5 w-3 h-3 bg-white border border-orange-500 rounded-full cursor-w-resize z-50 pointer-events-auto" />
-                    </>
-                  )}
 
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); resetCrop(); }}
-                    className="absolute -top-6 right-0 bg-zinc-800 text-white p-1 rounded hover:bg-zinc-700 pointer-events-auto"
-                    title="Reset Crop"
-                  >
-                    <RefreshCcw className="w-3 h-3" />
-                  </button>
-                </div>
-
-                {/* Playback Controls Overlay */}
-                <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); togglePlay(); }}
-                    className="w-16 h-16 bg-white/10 backdrop-blur-md rounded-full flex items-center justify-center pointer-events-auto hover:scale-110 transition-transform"
-                  >
-                    {isPlaying ? <Pause className="w-8 h-8" /> : <Play className="w-8 h-8 ml-1" />}
-                  </button>
+                  {/* Playback Controls Overlay */}
+                  <div className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); togglePlay(); }}
+                      className="w-16 h-16 bg-white/10 backdrop-blur-md rounded-full flex items-center justify-center pointer-events-auto hover:scale-110 transition-transform"
+                    >
+                      {isPlaying ? <Pause className="w-8 h-8" /> : <Play className="w-8 h-8 ml-1" />}
+                    </button>
+                  </div>
                 </div>
               </div>
 
               {/* Timeline Section */}
-              <div className="mt-auto bg-zinc-900/50 border border-zinc-800 p-6 rounded-2xl space-y-4">
-                <div className="flex items-center justify-between text-sm font-mono text-zinc-500">
-                  <div className="flex items-center gap-4">
-                    <span className="text-white font-bold">{formatTime(currentTime)}</span>
-                    <span className="opacity-50">/</span>
+              <div className="mt-auto bg-zinc-950 border border-zinc-800/60 p-5 rounded-2xl space-y-4">
+                <div className="flex items-center justify-between text-xs font-mono text-zinc-500">
+                  <div className="flex items-center gap-3">
+                    <span className="text-zinc-300">{formatTime(currentTime)}</span>
+                    <span className="opacity-40">/</span>
                     <span>{formatTime(duration)}</span>
                   </div>
                   <div className="flex gap-4">
-                    <span className="text-orange-500/80">Trim: {formatTime(Math.min(trimRange.start, trimRange.end))} - {formatTime(Math.max(trimRange.start, trimRange.end))}</span>
+                    <span className="text-zinc-400">
+                      Duration: {formatTime(Math.abs(trimRange.end - trimRange.start))}
+                    </span>
                   </div>
                 </div>
 
-                {/* Enhanced Timeline */}
+                {/* High-Performance Track */}
                 <div 
                   ref={timelineRef}
-                  onClick={handleTimelineClick}
-                  onContextMenu={handleTimelineContextMenu}
-                  className="relative h-14 bg-zinc-800/30 rounded-xl flex items-center cursor-pointer group/timeline select-none"
+                  onPointerDown={(e) => handleTimelinePointerDown(e, 'playhead')}
+                  onPointerMove={handleTimelinePointerMove}
+                  onPointerUp={handleTimelinePointerUp}
+                  onPointerCancel={handleTimelinePointerUp}
+                  onContextMenu={(e) => e.preventDefault()}
+                  className="relative h-12 bg-[#111] border border-zinc-800/80 rounded-lg cursor-text select-none group touch-none overflow-hidden"
                 >
-                  {/* Track Background */}
-                  <div className="absolute inset-x-0 h-2 bg-zinc-800 rounded-full overflow-hidden">
-                    {/* Trim Range Highlight */}
-                    <div 
-                      className="absolute h-full bg-orange-500/20"
-                      style={{
-                        left: `${duration > 0 ? (Math.min(trimRange.start, trimRange.end) / duration) * 100 : 0}%`,
-                        width: `${duration > 0 ? (Math.abs(trimRange.end - trimRange.start) / duration) * 100 : 0}%`
-                      }}
-                    />
-                    {/* Progress Bar */}
-                    <div 
-                      className="absolute h-full bg-orange-500 transition-all duration-75"
-                      style={{ 
-                        left: `${duration > 0 ? (Math.min(trimRange.start, currentTime) / duration) * 100 : 0}%`, 
-                        width: `${duration > 0 ? (Math.max(0, currentTime - trimRange.start) / duration) * 100 : 0}%` 
-                      }}
-                    />
-                  </div>
-
-                  {/* Playhead Handle */}
+                  {/* Unselected Out-of-bounds Areas (Dimmed) */}
                   <div 
-                    onMouseDown={(e) => { e.stopPropagation(); setIsDraggingPlayhead(true); }}
-                    className="absolute h-8 w-1 bg-white rounded-full shadow-lg z-20 cursor-grab active:cursor-grabbing transition-all duration-75"
-                    style={{ left: `${duration > 0 ? (currentTime / duration) * 100 : 0}%`, transform: 'translateX(-50%)' }}
-                  >
-                    <div className="absolute -top-1 -left-1.5 w-4 h-4 bg-white rounded-full border-2 border-orange-500" />
-                  </div>
-                  
-                  {/* Trim Markers */}
-                  <div className="absolute inset-x-0 h-full pointer-events-none">
-                    {/* Start Marker */}
-                    <div 
-                      onMouseDown={(e) => { e.stopPropagation(); setIsDraggingStart(true); }}
-                      className="absolute top-1/2 -translate-y-1/2 w-4 h-8 bg-orange-500 rounded-sm cursor-col-resize pointer-events-auto z-30 flex items-center justify-center group/marker"
-                      style={{ left: `${duration > 0 ? (trimRange.start / duration) * 100 : 0}%`, transform: 'translateX(-50%)' }}
-                    >
-                      <div className="w-0.5 h-4 bg-black/30 rounded-full" />
-                      <div className="absolute -top-8 bg-orange-500 text-black text-[10px] font-bold px-1 rounded opacity-0 group-hover/marker:opacity-100 transition-opacity whitespace-nowrap">
-                        Start: {formatTime(trimRange.start)}
-                      </div>
-                    </div>
+                    className="absolute top-0 bottom-0 left-0 bg-black/60 z-0 backdrop-blur-[1px]"
+                    style={{ width: `${duration > 0 ? (Math.min(trimRange.start, trimRange.end) / duration) * 100 : 0}%` }}
+                  />
+                  <div 
+                    className="absolute top-0 bottom-0 right-0 bg-black/60 z-0 backdrop-blur-[1px]"
+                    style={{ width: `${duration > 0 ? (100 - (Math.max(trimRange.start, trimRange.end) / duration) * 100) : 0}%` }}
+                  />
 
-                    {/* End Marker */}
-                    <div 
-                      onMouseDown={(e) => { e.stopPropagation(); setIsDraggingEnd(true); }}
-                      className="absolute top-1/2 -translate-y-1/2 w-4 h-8 bg-orange-500 rounded-sm cursor-col-resize pointer-events-auto z-30 flex items-center justify-center group/marker"
-                      style={{ left: `${duration > 0 ? (trimRange.end / duration) * 100 : 0}%`, transform: 'translateX(-50%)' }}
-                    >
-                      <div className="w-0.5 h-4 bg-black/30 rounded-full" />
-                      <div className="absolute -top-8 bg-orange-500 text-black text-[10px] font-bold px-1 rounded opacity-0 group-hover/marker:opacity-100 transition-opacity whitespace-nowrap">
-                        End: {formatTime(trimRange.end)}
-                      </div>
-                    </div>
+                  {/* Active Selected Clip Range */}
+                  <div 
+                    className="absolute top-0 bottom-0 border-y border-zinc-700/50 bg-zinc-800/20 z-0 pointer-events-none"
+                    style={{ 
+                      left: `${duration > 0 ? (Math.min(trimRange.start, trimRange.end) / duration) * 100 : 0}%`,
+                      right: `${duration > 0 ? (100 - (Math.max(trimRange.start, trimRange.end) / duration) * 100) : 0}%`
+                    }}
+                  />
+
+                  {/* Start Marker Handle */}
+                  <div 
+                    className="absolute top-0 bottom-0 w-8 -translate-x-1/2 cursor-ew-resize z-20 flex items-center justify-center group/marker touch-none"
+                    style={{ left: `${duration > 0 ? (trimRange.start / duration) * 100 : 0}%` }}
+                    onPointerDown={(e) => handleTimelinePointerDown(e, 'start')}
+                  >
+                    <div className="w-1.5 h-3/5 bg-zinc-500 group-hover/marker:bg-white rounded-full transition-colors" />
+                  </div>
+
+                  {/* End Marker Handle */}
+                  <div 
+                    className="absolute top-0 bottom-0 w-8 -translate-x-1/2 cursor-ew-resize z-20 flex items-center justify-center group/marker touch-none"
+                    style={{ left: `${duration > 0 ? (trimRange.end / duration) * 100 : 0}%` }}
+                    onPointerDown={(e) => handleTimelinePointerDown(e, 'end')}
+                  >
+                    <div className="w-1.5 h-3/5 bg-zinc-500 group-hover/marker:bg-white rounded-full transition-colors" />
+                  </div>
+
+                  {/* Playhead Line */}
+                  <div 
+                    className="absolute top-0 bottom-0 w-px bg-orange-500 z-30 pointer-events-none shadow-[0_0_8px_rgba(239,68,68,0.8)]"
+                    style={{ left: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
+                  >
+                    {/* Tiny Triangle / Dot on top of playhead */}
+                    <div className="absolute -top-1 left-1/2 -translate-x-1/2 w-2.5 h-2.5 bg-orange-500 rounded-sm" />
                   </div>
                 </div>
               </div>
@@ -806,7 +852,29 @@ export default function App() {
               <div className="bg-zinc-900/50 border border-zinc-800 p-5 rounded-2xl space-y-4">
                 <div className="flex items-center justify-between">
                   <h3 className="text-xs font-bold uppercase tracking-widest text-zinc-500">Playback</h3>
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 relative">
+                    <div className="group flex items-center">
+                      <button 
+                        className="p-1.5 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-300 hover:bg-zinc-700 transition-colors"
+                        title="Keyboard Shortcuts"
+                      >
+                        <Keyboard className="w-4 h-4" />
+                      </button>
+                      <div className="absolute top-full right-0 mt-2 w-56 p-3 bg-zinc-800 border border-zinc-700 rounded-xl shadow-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50 text-xs text-left">
+                        <h4 className="font-bold text-white mb-2 uppercase tracking-widest text-[10px]">Shortcuts</h4>
+                        <div className="space-y-1.5 text-zinc-300">
+                          <div className="flex justify-between items-center"><kbd className="bg-zinc-900 px-1.5 py-0.5 border border-zinc-700 rounded text-orange-500 font-mono">Space</kbd> <span>Play / Pause</span></div>
+                          <div className="flex justify-between items-center"><kbd className="bg-zinc-900 px-1.5 py-0.5 border border-zinc-700 rounded text-orange-500 font-mono">B</kbd> <span>Set Start Trim</span></div>
+                          <div className="flex justify-between items-center"><kbd className="bg-zinc-900 px-1.5 py-0.5 border border-zinc-700 rounded text-orange-500 font-mono">N</kbd> <span>Set End Trim</span></div>
+                          <div className="flex justify-between items-center"><kbd className="bg-zinc-900 px-1.5 py-0.5 border border-zinc-700 rounded text-orange-500 font-mono">C</kbd> <span>Toggle Crop</span></div>
+                          <div className="flex justify-between items-center"><kbd className="bg-zinc-900 px-1.5 py-0.5 border border-zinc-700 rounded text-orange-500 font-mono">D</kbd> <span>Auto-Detect Bars</span></div>
+                          <div className="flex justify-between items-center"><kbd className="bg-zinc-900 px-1.5 py-0.5 border border-zinc-700 rounded text-orange-500 font-mono">P</kbd> <span>Preview Result</span></div>
+                          <div className="flex justify-between items-center"><kbd className="bg-zinc-900 px-1.5 py-0.5 border border-zinc-700 rounded text-orange-500 font-mono">Ctrl+Z</kbd> <span>Undo</span></div>
+                          <div className="flex justify-between items-center"><kbd className="bg-zinc-900 px-1.5 py-0.5 border border-zinc-700 rounded text-orange-500 font-mono">Ctrl+Y</kbd> <span>Redo</span></div>
+                        </div>
+                      </div>
+                    </div>
+                    
                     <button 
                       onClick={() => setIsLooping(!isLooping)}
                       className={cn(
@@ -822,7 +890,7 @@ export default function App() {
                     <button 
                       onClick={undo}
                       disabled={history.length <= 1}
-                      className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 disabled:opacity-30 transition-colors"
+                      className="p-1.5 rounded-lg bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-zinc-400 disabled:opacity-30 transition-colors"
                       title="Undo (Ctrl+Z)"
                     >
                       <Undo2 className="w-4 h-4" />
@@ -830,7 +898,7 @@ export default function App() {
                     <button 
                       onClick={redo}
                       disabled={redoStack.length === 0}
-                      className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 disabled:opacity-30 transition-colors"
+                      className="p-1.5 rounded-lg bg-zinc-800 border border-zinc-700 hover:bg-zinc-700 text-zinc-400 disabled:opacity-30 transition-colors"
                       title="Redo (Ctrl+Shift+Z)"
                     >
                       <Redo2 className="w-4 h-4" />
@@ -919,50 +987,60 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Trim Controls */}
-              <div className="bg-zinc-900/50 border border-zinc-800 p-5 rounded-2xl space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-bold uppercase tracking-widest text-zinc-500">Trim Settings</h3>
-                </div>
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between gap-4">
-                    <div className="flex-1 space-y-1">
-                      <label className="text-[10px] text-zinc-500 font-bold uppercase">Start</label>
-                      <input 
-                        type="number" 
-                        step="0.1"
-                        value={trimRange.start.toFixed(2)}
-                        onChange={(e) => setTrimRange(prev => ({ ...prev, start: Math.max(0, parseFloat(e.target.value)) }))}
-                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-orange-500 font-mono"
-                      />
-                    </div>
-                    <div className="flex-1 space-y-1">
-                      <label className="text-[10px] text-zinc-500 font-bold uppercase">End</label>
-                      <input 
-                        type="number" 
-                        step="0.1"
-                        value={trimRange.end.toFixed(2)}
-                        onChange={(e) => setTrimRange(prev => ({ ...prev, end: Math.min(duration, parseFloat(e.target.value)) }))}
-                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-2 py-1.5 text-xs focus:outline-none focus:border-orange-500 font-mono"
-                      />
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <button 
-                      onClick={() => setTrimRange(prev => ({ ...prev, start: currentTime }))}
-                      className="py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-[10px] font-bold uppercase tracking-wider text-zinc-400 border border-zinc-700"
-                    >
-                      Set Start (B)
-                    </button>
-                    <button 
-                      onClick={() => setTrimRange(prev => ({ ...prev, end: currentTime }))}
-                      className="py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-[10px] font-bold uppercase tracking-wider text-zinc-400 border border-zinc-700"
-                    >
-                      Set End (N)
-                    </button>
-                  </div>
-                </div>
-              </div>
+			{/* Trim Controls */}
+			<div className="bg-zinc-900/50 border border-zinc-800 p-5 rounded-2xl space-y-4">
+			  <div className="flex items-center justify-between">
+				<h3 className="text-xs font-bold uppercase tracking-widest text-zinc-500">Trim Settings</h3>
+			  </div>
+			  <div className="grid grid-cols-2 gap-4">
+				
+				{/* Start Control */}
+				<div className="flex flex-col gap-2">
+				  <button 
+					onClick={() => {
+					  setTrimRange(prev => {
+						const next = { ...prev, start: currentTime };
+						addToHistory(next, cropArea);
+						return next;
+					  });
+					}}
+					className="w-full py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-[10px] font-bold uppercase tracking-wider text-zinc-300 border border-zinc-700 transition-all"
+				  >
+					Set Start
+				  </button>
+				  <input 
+					type="number" 
+					step="0.1"
+					value={trimRange.start.toFixed(2)}
+					onChange={(e) => setTrimRange(prev => ({ ...prev, start: Math.max(0, parseFloat(e.target.value) || 0) }))}
+					className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 font-mono text-center transition-all [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none [-moz-appearance:textfield]"
+				  />
+				</div>
+
+				{/* End Control */}
+				<div className="flex flex-col gap-2">
+				  <button 
+					onClick={() => {
+					  setTrimRange(prev => {
+						const next = { ...prev, end: currentTime };
+						addToHistory(next, cropArea);
+						return next;
+					  });
+					}}
+					className="w-full py-2 rounded-xl bg-zinc-800 hover:bg-zinc-700 active:bg-zinc-600 text-[10px] font-bold uppercase tracking-wider text-zinc-300 border border-zinc-700 transition-all"
+				  >
+					Set End
+				  </button>
+				  <input 
+					type="number" 
+					step="0.1"
+					value={trimRange.end.toFixed(2)}
+					onChange={(e) => setTrimRange(prev => ({ ...prev, end: Math.min(duration, parseFloat(e.target.value) || 0) }))}
+					className="w-full bg-zinc-800 border border-zinc-700 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:border-orange-500 focus:ring-1 focus:ring-orange-500 font-mono text-center transition-all [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none [-moz-appearance:textfield]"
+				  />
+				</div>
+			  </div>
+			</div>
 
               {/* Export Buttons */}
               <div className="mt-auto space-y-3">
@@ -1015,7 +1093,7 @@ export default function App() {
 
       {/* Quick Tips */}
       {!videoUrl && (
-        <div className="fixed bottom-10 left-1/2 -translate-x-1/2 flex gap-8 text-zinc-600">
+        <div className="fixed bottom-10 left-1/2 -translate-x-1/2 flex gap-8 text-zinc-600 hidden sm:flex">
           <div className="flex items-center gap-2 text-xs uppercase tracking-widest font-bold">
             <Clipboard className="w-4 h-4" />
             Paste Support

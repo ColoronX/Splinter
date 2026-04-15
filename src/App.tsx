@@ -153,16 +153,14 @@ export default function App() {
     }
   }, []);
 
-  const detectBars = useCallback(() => {
+const detectBars = useCallback(() => {
     if (!videoRef.current) return;
     const video = videoRef.current;
     const canvas = document.createElement('canvas');
     
-    // Optimization: Use a small proxy canvas for analysis (much faster than full res)
-    const analysisWidth = 320;
-    const analysisHeight = Math.round((video.videoHeight / video.videoWidth) * analysisWidth);
-    canvas.width = analysisWidth;
-    canvas.height = analysisHeight;
+    // Use native resolution for pixel-perfect cropping
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
     
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     if (!ctx) return;
@@ -171,68 +169,78 @@ export default function App() {
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const data = imageData.data;
 
-    // Robust luminance-based detection
-    const isBlackOrWhite = (r: number, g: number, b: number) => {
-      const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      return lum < 40 || lum > 215; // Slightly tighter for accuracy
-    };
+    // 1. Determine if the video is letterboxed (Black) or pillarboxed (White)
+    // We sample 8 points along the edges to see which color dominates the borders
+    const w = canvas.width - 1;
+    const h = canvas.height - 1;
+    const midX = Math.floor(w / 2);
+    const midY = Math.floor(h / 2);
+    
+    const points = [
+      [0, 0], [midX, 0], [w, 0],      // Top edge
+      [0, midY], [w, midY],           // Middle left/right edges
+      [0, h], [midX, h], [w, h]       // Bottom edge
+    ];
+    
+    let blackVotes = 0;
+    let whiteVotes = 0;
+    
+    points.forEach(([x, y]) => {
+      const idx = (y * canvas.width + x) * 4;
+      const lum = 0.2126 * data[idx] + 0.7152 * data[idx + 1] + 0.0722 * data[idx + 2];
+      if (lum < 40) blackVotes++;
+      else if (lum > 215) whiteVotes++;
+    });
+    
+    // Choose the target color based on the borders (defaults to black)
+    const targetMode = whiteVotes > blackVotes ? 'white' : 'black';
 
-    // Check if a row/column is mostly empty (bars)
+    // 2. Scan lines looking ONLY for the detected bar color
     const isLineEmpty = (lineIdx: number, isRow: boolean) => {
-      let emptyCount = 0;
       const length = isRow ? canvas.width : canvas.height;
+      let failures = 0;
       
-      // Sample every pixel on the small canvas
+      // 5% tolerance for noise, compression artifacts, or faint edge watermarks
+      const maxFailures = length * 0.05; 
+      
       for (let i = 0; i < length; i++) {
         const x = isRow ? i : lineIdx;
         const y = isRow ? lineIdx : i;
         const idx = (y * canvas.width + x) * 4;
-        if (isBlackOrWhite(data[idx], data[idx + 1], data[idx + 2])) {
-          emptyCount++;
+        
+        const lum = 0.2126 * data[idx] + 0.7152 * data[idx + 1] + 0.0722 * data[idx + 2];
+        
+        // Only evaluate the specific color we are trying to crop
+        const isBarPixel = targetMode === 'white' ? (lum > 215) : (lum < 40);
+        
+        if (!isBarPixel) {
+          failures++;
+          if (failures > maxFailures) return false;
         }
       }
-      return emptyCount / length > 0.92; // 92% threshold
+      return true;
     };
 
     let top = 0, bottom = canvas.height - 1, left = 0, right = canvas.width - 1;
 
-    // Scan from top
     for (let y = 0; y < canvas.height; y++) {
-      if (!isLineEmpty(y, true)) {
-        top = y;
-        break;
-      }
+      if (!isLineEmpty(y, true)) { top = y; break; }
     }
-
-    // Scan from bottom
-    for (let y = canvas.height - 1; y >= 0; y--) {
-      if (!isLineEmpty(y, true)) {
-        bottom = y;
-        break;
-      }
+    for (let y = canvas.height - 1; y >= top; y--) {
+      if (!isLineEmpty(y, true)) { bottom = y; break; }
     }
-
-    // Scan from left
     for (let x = 0; x < canvas.width; x++) {
-      if (!isLineEmpty(x, false)) {
-        left = x;
-        break;
-      }
+      if (!isLineEmpty(x, false)) { left = x; break; }
     }
-
-    // Scan from right
-    for (let x = canvas.width - 1; x >= 0; x--) {
-      if (!isLineEmpty(x, false)) {
-        right = x;
-        break;
-      }
+    for (let x = canvas.width - 1; x >= left; x--) {
+      if (!isLineEmpty(x, false)) { right = x; break; }
     }
 
     const newCrop = {
       x: (left / canvas.width) * 100,
       y: (top / canvas.height) * 100,
-      width: ((right - left) / canvas.width) * 100,
-      height: ((bottom - top) / canvas.height) * 100
+      width: Math.min(100, ((right - left + 1) / canvas.width) * 100),
+      height: Math.min(100, ((bottom - top + 1) / canvas.height) * 100)
     };
     
     // Ensure we don't set invalid dimensions

@@ -10,7 +10,5 @@ Splinter provides a simple and precise way to crop videos entirely in your brows
 * Precise, visual crop adjustments
 * Client-side processing via ffmpeg
 * Strict, minimal user interface
-<<<<<<< HEAD
-<<<<<<< HEAD
 
 Hosted on: https://coloronx.github.io/Splinter/
